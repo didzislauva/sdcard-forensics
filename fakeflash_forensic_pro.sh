@@ -24,14 +24,16 @@ Options:
   -t, --tail-mib N        Tail window in MiB (compare last N MiB)
   -c, --candidates "..."  Candidate capacities in MiB (space-separated)
       --dump-duplicates   Dump first occurrence of each duplicate block to CWD
-      --log FILE          Write full log to FILE (default: ./fakeflash_forensic_pro.log)
+      --log FILE          Write full log to FILE (default: ./fakeflash_forensic_pro/scan_YYYYmmdd_HHMMSS.log)
       --monochrome        Disable ANSI colors on console output
+  -q, --quiet             Suppress console output (log still written)
   -h, --help              Show help
 
 Notes:
   - If no profile is given and no advanced flags are set, the script auto-picks
     the closest profile based on the image size.
   - Advanced flags override the selected profile.
+  - Warning: Results are indicative only and do not prove a card is fake.
 USAGE
 }
 
@@ -56,7 +58,11 @@ parse_args () {
   DUMP_DUP=0
   LOG_FILE=""
   MONOCHROME=0
+  QUIET=0
   IMG=""
+  dup_count=0
+  best_hits=0
+  best_cand=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -82,6 +88,8 @@ parse_args () {
         LOG_FILE="$2"; shift 2 ;;
       --monochrome)
         MONOCHROME=1; shift ;;
+      -q|--quiet)
+        QUIET=1; shift ;;
       -h|--help)
         usage; exit 0 ;;
       -* )
@@ -146,11 +154,20 @@ check_tools () {
 # Route stdout/stderr to both console and log, stripping ANSI in the log.
 init_logging () {
   if [[ -z "$LOG_FILE" ]]; then
-    LOG_FILE="${PWD}/fakeflash_forensic_pro.log"
+    local base ts
+    base="$(basename "$0")"
+    base="${base%.sh}"
+    ts="$(date +%Y%m%d_%H%M%S)"
+    LOG_FILE="${PWD}/${base}/scan_${ts}.log"
   fi
   mkdir -p "$(dirname "$LOG_FILE")"
   touch "$LOG_FILE"
-  exec > >(tee >(sed -E $'s/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
+  if [[ "$QUIET" -eq 1 ]]; then
+    exec > >(sed -E $'s/\x1b\[[0-9;]*m//g' >> "$LOG_FILE") 2>&1
+  else
+    exec > >(tee >(sed -E $'s/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
+  fi
+  echo "${CLR_CYAN}Logging to:${CLR_RESET} $LOG_FILE"
 }
 
 # Read image size in bytes, with macOS stat fallback.
@@ -168,12 +185,12 @@ auto_pick_profile () {
   fi
 
   local size_gib best_profile best_diff diff cmp
-  size_gib=$(awk -v b="$size_bytes" 'BEGIN{printf "%.3f", b/1024/1024/1024}')
+  size_gib=$(LC_ALL=C awk -v b="$size_bytes" 'BEGIN{printf "%.3f", b/1024/1024/1024}')
   best_profile="8G"
-  best_diff=$(awk -v s="$size_gib" 'BEGIN{d=s-8; if(d<0)d=-d; printf "%.3f", d}')
+  best_diff=$(LC_ALL=C awk -v s="$size_gib" 'BEGIN{d=s-8; if(d<0)d=-d; printf "%.3f", d}')
   for p in 16 32 64 128 256; do
-    diff=$(awk -v s="$size_gib" -v p="$p" 'BEGIN{d=s-p; if(d<0)d=-d; printf "%.3f", d}')
-    cmp=$(awk -v a="$diff" -v b="$best_diff" 'BEGIN{print (a<b)?1:0}')
+    diff=$(LC_ALL=C awk -v s="$size_gib" -v p="$p" 'BEGIN{d=s-p; if(d<0)d=-d; printf "%.3f", d}')
+    cmp=$(LC_ALL=C awk -v a="$diff" -v b="$best_diff" 'BEGIN{print (a<b)?1:0}')
     if [[ "$cmp" -eq 1 ]]; then
       best_diff="$diff"
       best_profile="${p}G"
@@ -271,6 +288,11 @@ banner () {
   echo "${CLR_CYAN}============================================================${CLR_RESET}"
 }
 
+warning_banner () {
+  echo
+  echo "${CLR_YELLOW}WARNING:${CLR_RESET} Results are indicative only and do not prove a card is fake."
+}
+
 # Format bytes as MiB (used for info printing only).
 human () {
   awk -v b="$1" 'BEGIN{printf "%.1f MiB", b/1024/1024}'
@@ -282,13 +304,42 @@ read_and_split () {
   local bytes=$((count*BS))
   printf "%s %s: reading %s  (skip=%s blocks, count=%s blocks)\n" "$P_INFO" "$label" "$(human "$bytes")" "$skip" "$count"
 
+  local spinner_pid="" spinner_out=""
+  if [[ "$QUIET" -eq 0 ]]; then
+    if [[ -w /dev/tty ]]; then
+      spinner_out="/dev/tty"
+    elif [[ -t 2 ]]; then
+      spinner_out="/dev/stderr"
+    elif [[ -t 1 ]]; then
+      spinner_out="/dev/stdout"
+    fi
+  fi
+  if [[ -n "$spinner_out" ]]; then
+    (
+      local dots=1
+      while true; do
+        printf "\r    reading%-3s" "$(printf '%.*s' "$dots" "...")" > "$spinner_out" 2>/dev/null || true
+        dots=$((dots+1))
+        if (( dots > 3 )); then dots=1; fi
+        sleep 0.5
+      done
+    ) &
+    spinner_pid="$!"
+  fi
+
   if [[ $have_pv -eq 1 ]]; then
     dd if="$IMG" bs="$BS" skip="$skip" count="$count" status=none \
       | pv -ptebar -s "$bytes" \
       | split -b "$BS" -d -a 6 - "$tmpdir/${prefix}_"
   else
-    dd if="$IMG" bs="$BS" skip="$skip" count="$count" status=progress \
+    dd if="$IMG" bs="$BS" skip="$skip" count="$count" status=none \
       | split -b "$BS" -d -a 6 - "$tmpdir/${prefix}_"
+  fi
+
+  if [[ -n "$spinner_pid" ]]; then
+    kill "$spinner_pid" >/dev/null 2>&1 || true
+    wait "$spinner_pid" >/dev/null 2>&1 || true
+    printf "\r    reading... done\n" > "$spinner_out" 2>/dev/null || true
   fi
 }
 
@@ -309,7 +360,7 @@ hash_chunks () {
   i=0
   for f in "${files[@]}"; do
     i=$((i+1))
-    if [[ -w /dev/tty ]]; then
+    if [[ "$QUIET" -eq 0 && -w /dev/tty ]]; then
       printf "\r    hashing: %d/%d" "$i" "$n" > /dev/tty 2>/dev/null || true
     fi
     $hash_cmd "$f" | awk '{print $1}' >> "$out"
@@ -518,13 +569,27 @@ print_summary () {
   echo
 }
 
+# Final run summary.
+run_summary () {
+  banner "RUN SUMMARY"
+  if [[ -n "${START_TIME:-}" && -n "${END_TIME:-}" ]]; then
+    local elapsed=$((END_TIME - START_TIME))
+    echo "${P_INFO} Elapsed:     ${elapsed}s"
+  fi
+  echo "${P_INFO} Best hit:    ${best_hits}/${tail_blocks} matches (candidate ${best_cand} MiB)"
+  echo "${P_INFO} Duplicates:  ${dup_count} duplicate sample block hash(es)"
+  echo "${P_INFO} Log file:    $LOG_FILE"
+  echo
+}
 # Main orchestrator tying all steps together in a read-only workflow.
 main () {
   parse_args "$@"
   init_colors
   init_logging
+  warning_banner
   check_tools
 
+  START_TIME=$(date +%s)
   read_image_size
   auto_pick_profile
   apply_profile_defaults
@@ -543,6 +608,11 @@ main () {
   hash_tail_window
   compare_candidates
   interpret_results
+
+  END_TIME=$(date +%s)
+  run_summary
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
