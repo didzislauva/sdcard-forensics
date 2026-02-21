@@ -1,7 +1,7 @@
 # sdcard-forensics
 
 **Read‑only forensic tooling for flash images.**  
-Find real data boundaries, detect wrap/alias patterns, and extract evidence slices — without touching the source image.
+Find real data boundaries, detect wrap/alias patterns, and generate synthetic images to validate your analysis — without touching the source image.
 
 ---
 
@@ -9,6 +9,7 @@ Find real data boundaries, detect wrap/alias patterns, and extract evidence slic
 
 - **Locate the last real data** in a padded or over‑reported image.
 - **Detect wrap/alias patterns** that are common in fake‑capacity flash.
+- **Generate controlled test images** to validate tools and edge cases.
 - **Extract evidence slices** (trimmed image, last sector, or boundary sectors).
 - **Produce timestamped logs** suitable for case notes and audits.
 
@@ -53,10 +54,31 @@ Docs: `fakeflash_forensic_pro.md`
 
 ---
 
+### `image_generator.sh`
+Generates **synthetic raw images** for testing and validation. Supports empty/full/partial/weird/range modes with precise control over padding and last‑sector placement.
+
+**Best for:**  
+- Regression tests for boundary detection  
+- Creating tricky off‑by‑one cases  
+- Simulating fake capacity with early end‑of‑data  
+- Range‑only sector fills for targeted scans
+
+**Features**  
+- GiB profiles: `1g,2g,4g,8g,16g,32g`  
+- Modes: `empty`, `full`, `partial`, `weird`, `range`  
+- Padding control (`ff` / `00`)  
+- Random / pattern / seeded data  
+- Partial‑sector writes and range fills
+
+Docs: `image_generator.md`
+
+---
+
 ## Requirements
 
 ### Required Tools
 - `dd`, `stat`, `split`, `sort`, `uniq`, `awk`, `head`, `xxd`, `mktemp`, `sed`, `wc`, `tr`, `basename`, `grep`
+- `python3` (required for image generation and precise offsets)
 
 ### Optional (recommended)
 - `pv` (nicer progress in `fakeflash_forensic_pro.sh`)  
@@ -72,6 +94,9 @@ Docs: `fakeflash_forensic_pro.md`
 
 # Fake flash detection
 ./fakeflash_forensic_pro.sh -p 64G image.dd
+
+# Generate a fake 2GiB image with data ending early (weird mode)
+./image_generator.sh -o fake2g.dd --mode weird --fake-gib 2
 ```
 
 ---
@@ -84,6 +109,26 @@ Docs: `fakeflash_forensic_pro.md`
 
 ---
 
+## What Else Could Be Added
+
+If you want more capability, the next logical additions are:
+
+1. **Automatic cross‑tool workflow**  
+Run `boundary_scanner.sh` automatically after `fakeflash_forensic_pro.sh` and append results to the same log.
+
+2. **Confidence scoring**  
+Aggregate duplicate‑block rate + tail‑match rate into a numeric confidence metric.
+
+3. **Export formats**  
+JSON summary for integration in reports or dashboards.
+
+4. **Batch mode**  
+Run multiple images from a directory, produce per‑image logs + summary CSV.
+
+5. **Report bundles**  
+Auto‑collect logs, boundary slices, and summary in a single archive.
+
+---
 
 ## License
 See `LICENSE`.
